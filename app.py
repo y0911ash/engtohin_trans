@@ -34,7 +34,7 @@ with tab1:
             with st.spinner("🔄 Initializing Translation Pipeline..."):
                 try:
                     # Using Helsinki-NLP for high-quality translation
-                    translator = pipeline("translation_en_to_hi", model="Helsinki-NLP/opus-mt-en-hi")
+                    translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-hi")
                     res = translator(trans_input)
                     st.success("##### Translation Output:")
                     st.info(res[0]['translation_text'])
