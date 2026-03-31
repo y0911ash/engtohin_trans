@@ -32,6 +32,7 @@ with tab1:
     if st.button("Translate", key="trans_btn"):
         if trans_input:
             with st.spinner("🔄 Initializing Translation Pipeline..."):
+                try:
                     # Using AutoModel and AutoTokenizer for maximum reliability
                     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
                     
@@ -49,6 +50,13 @@ with tab1:
                     st.error(f"Engine Error: {str(e)}")
         else:
             st.warning("Please enter some text to translate.")
+
+# Sidebar Warning
+with st.sidebar:
+    import sys
+    st.info(f"System Python: {sys.version.split()[0]}")
+    if "3.14" in sys.version:
+        st.error("⚠️ CRITICAL: Python 3.14 detected. Many ML libraries (Torch/Transformers) may fail. Please downgrade to 3.11 in Streamlit Settings.")
 
 with tab2:
     st.subheader("Neural Text Summarization")
