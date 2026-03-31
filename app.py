@@ -32,12 +32,19 @@ with tab1:
     if st.button("Translate", key="trans_btn"):
         if trans_input:
             with st.spinner("🔄 Initializing Translation Pipeline..."):
-                try:
-                    # Using Helsinki-NLP for high-quality translation
-                    translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-hi")
-                    res = translator(trans_input)
+                    # Using AutoModel and AutoTokenizer for maximum reliability
+                    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+                    
+                    model_name = "Helsinki-NLP/opus-mt-en-hi"
+                    tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+                    
+                    inputs = tokenizer(trans_input, return_tensors="pt", padding=True)
+                    translated_tokens = model.generate(**inputs)
+                    res_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+                    
                     st.success("##### Translation Output:")
-                    st.info(res[0]['translation_text'])
+                    st.info(res_text)
                 except Exception as e:
                     st.error(f"Engine Error: {str(e)}")
         else:
