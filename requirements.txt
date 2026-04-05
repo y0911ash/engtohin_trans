@@ -1,8 +1,9 @@
 torch
 torchvision
-transformers
+transformers==4.38.2
 streamlit
 pandas
 datasets
 sentencepiece
 sacremoses
+gradio

@@ -3,166 +3,128 @@ import torch
 import torch.nn as nn
 from model import EncoderLSTM, DecoderLSTM, Seq2Seq, DecoderAttention, Seq2SeqWithAttention
 import os
-import sys
-from torchtext.data.utils import get_tokenizer
+import re
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 # Page Config
 st.set_page_config(page_title="Researcher MT Hub", layout="wide", page_icon="🔬")
 
-# Custom Styling
+# Robust Tokenizers (Portable-Style)
+def simple_tokenizer(text):
+    text = text.lower()
+    text = re.sub(r"([.,!?\"':;])", r" \1 ", text)
+    return text.split()
+
+def hindi_tokenizer(text):
+    return text.split()
+
+# CSS Styling
 st.markdown("""
 <style>
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-        color: #e2e8f0;
-    }
-    h1 {
-        background: -webkit-linear-gradient(45deg, #38bdf8, #818cf8);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .comparison-box {
-        background: rgba(255, 255, 255, 0.05);
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        min-height: 150px;
-    }
+    .stApp { background: linear-gradient(135deg, #020617 0%, #171717 100%); color: #f8fafc; }
+    .comparison-box { background: rgba(255, 255, 255, 0.03); padding: 1.5rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); font-size: 1.1rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # Path Resolution
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Helper Functions
-en_tokenizer = get_tokenizer('basic_english')
-
 @st.cache_resource
-def load_assets():
-    assets = {}
+def load_models_and_vocabs():
     try:
-        en_vocab_path = os.path.join(BASE_DIR, 'en_vocab.pt')
-        hi_vocab_path = os.path.join(BASE_DIR, 'hi_vocab.pt')
+        # 1. Load Portable Vocabs (Dict Format)
+        en_v_path = os.path.join(BASE_DIR, 'en_vocab_portable.pt')
+        hi_v_path = os.path.join(BASE_DIR, 'hi_vocab_portable.pt')
         
-        if not os.path.exists(en_vocab_path) or not os.path.exists(hi_vocab_path):
-            return None, "Vocabulary files (.pt) not found in workspace."
+        if not os.path.exists(en_v_path) or not os.path.exists(hi_v_path):
+            return None, "Vocabulary files (.pt) not found. Please sync from GitHub."
             
-        assets['en_vocab'] = torch.load(en_vocab_path, map_location='cpu')
-        assets['hi_vocab'] = torch.load(hi_vocab_path, map_location='cpu')
+        en_vocab = torch.load(en_v_path, map_location='cpu')
+        hi_vocab = torch.load(hi_v_path, map_location='cpu')
         
-        INPUT_DIM = len(assets['en_vocab'])
-        OUTPUT_DIM = len(assets['hi_vocab'])
-        HID_DIM = 256
-        N_LAYERS = 1
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 2. Setup Model Architecture
+        INPUT_DIM = len(en_vocab['stoi']) + 100 # buffer
+        OUTPUT_DIM = len(hi_vocab['itos']) + 100
+        HID_DIM, N_LAYERS, device = 256, 1, torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize Simple
-        enc1 = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
-        dec1 = DecoderLSTM(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
-        model_s = Seq2Seq(enc1, dec1, device).to(device)
+        # Simple Model
+        enc_s = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        dec_s = DecoderLSTM(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        model_s = Seq2Seq(enc_s, dec_s, device).to(device)
+        s_path = os.path.join(BASE_DIR, 'en-hi-simple-model.pt')
+        if os.path.exists(s_path):
+            model_s.load_state_dict(torch.load(s_path, map_location=device), strict=False)
         
-        simple_path = os.path.join(BASE_DIR, 'en-hi-simple-model.pt')
-        if os.path.exists(simple_path):
-            model_s.load_state_dict(torch.load(simple_path, map_location=device))
-        assets['model_simple'] = model_s
-        
-        # Initialize Attention
-        enc2 = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
-        dec2 = DecoderAttention(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
-        model_a = Seq2SeqWithAttention(enc2, dec2, device).to(device)
-        
-        attn_path = os.path.join(BASE_DIR, 'en-hi-attention-model.pt')
-        if os.path.exists(attn_path):
-            model_a.load_state_dict(torch.load(attn_path, map_location=device))
-        assets['model_attn'] = model_a
-        
-        return assets, None
+        # Attention Model
+        enc_a = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        dec_a = DecoderAttention(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        model_a = Seq2SeqWithAttention(enc_a, dec_a, device).to(device)
+        a_path = os.path.join(BASE_DIR, 'en-hi-attention-model.pt')
+        if os.path.exists(a_path):
+            model_a.load_state_dict(torch.load(a_path, map_location=device), strict=False)
+            
+        return {'s': model_s, 'a': model_a, 'env': en_vocab, 'hiv': hi_vocab}, None
     except Exception as e:
         return None, f"Asset Loading Error: {str(e)}"
 
-def translate_logic(sentence, model, assets, is_attention=True, max_len=50):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    en_vocab = assets['en_vocab']
-    hi_vocab = assets['hi_vocab']
-    
-    model.eval()
-    tokens = en_tokenizer(sentence)
-    src_indexes = [en_vocab['<sos>']] + [en_vocab[token] for token in tokens] + [en_vocab['<eos>']]
-    src_tensor = torch.LongTensor(src_indexes).unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        if is_attention:
-            encoder_outputs, (hidden, cell) = model.encoder.get_all_outputs(src_tensor)
-        else:
-            hidden, cell = model.encoder(src_tensor)
-            
-    trg_indexes = [hi_vocab['<sos>']]
-    for i in range(max_len):
-        trg_tensor = torch.LongTensor([trg_indexes[-1]]).to(device)
-        with torch.no_grad():
-            if is_attention:
-                output, hidden, cell, _ = model.decoder(trg_tensor, hidden, cell, encoder_outputs)
-            else:
-                output, hidden, cell = model.decoder(trg_tensor, hidden, cell)
-                
-        pred_token = output.argmax(1).item()
-        trg_indexes.append(pred_token)
-        if pred_token == hi_vocab['<eos>']: break
-        
-    itos = hi_vocab.get_itos()
-    res = " ".join([itos[i] for i in trg_indexes][1:-1])
-    return res if res else "(Empty Output)"
+# Main Sidebar
+st.sidebar.title("🔬 Seq2Seq Control")
+st.sidebar.info("Model: Lab A.1 Attention Strategy")
+st.sidebar.write(f"CUDA: {torch.cuda.is_available()}")
 
-# Main UI
-st.title("🌍 Researcher MT Hub")
-st.markdown("### English to Hindi Benchmark Suite")
-st.markdown("---")
-
-tab1, tab2 = st.tabs(["🚀 SOTA Translator", "🔬 Researcher Comparison"])
+# Tabs
+tab1, tab2 = st.tabs(["🌎 SOTA Predictor", "🔬 Researcher Bench"])
 
 with tab1:
-    st.subheader("SOTA MarianMT (Direct Model Inference)")
-    sota_input = st.text_area("English Source", key="sota_in", value="How are you?")
-    if st.button("SOTA Translate"):
-        with st.spinner("🔄 Neural Inference in progress..."):
-            try:
-                model_name = "Helsinki-NLP/opus-mt-en-hi"
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
-                model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-                inputs = tokenizer(sota_input, return_tensors="pt", padding=True)
-                translated_tokens = model.generate(**inputs)
-                res = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
-                st.success(f"**SOTA Result:** {res}")
-            except Exception as e:
-                st.error(f"SOTA Hub Error: {str(e)}")
+    st.subheader("Helsinki-NLP / Opus-MT (Direct Mode)")
+    txt = st.text_area("Source Text", key="sota_in", value="Where is the library?")
+    if st.button("Generate Cloud MT"):
+        with st.spinner("Processing..."):
+            name = "Helsinki-NLP/opus-mt-en-hi"
+            tokenizer = AutoTokenizer.from_pretrained(name)
+            model = AutoModelForSeq2SeqLM.from_pretrained(name)
+            inputs = tokenizer(txt, return_tensors="pt", padding=True)
+            out = tokenizer.decode(model.generate(**inputs)[0], skip_special_tokens=True)
+            st.success(out)
 
 with tab2:
-    st.subheader("Lab A.1: Custom Encoder-Decoder Benchmarks")
-    assets, error = load_assets()
-    
-    if error:
-        st.warning(f"⚠️ {error} Please run the notebook first.")
+    st.subheader("Architecture Comparison (Simple vs Attention)")
+    assets, err = load_models_and_vocabs()
+    if err:
+        st.warning(err)
     else:
-        user_input = st.text_input("Enter sentence to compare focus:", value="the book is on the table")
-        if st.button("Run Lab Comparison"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info("#### 🟦 Simple Seq2Seq")
-                out_s = translate_logic(user_input, assets['model_simple'], assets, is_attention=False)
-                st.markdown(f'<div class="comparison-box">{out_s}</div>', unsafe_allow_html=True)
-            with col2:
-                st.info("#### 🟨 Bahdanau Attention")
-                out_a = translate_logic(user_input, assets['model_attn'], assets, is_attention=True)
-                st.markdown(f'<div class="comparison-box">{out_a}</div>', unsafe_allow_html=True)
+        q = st.text_input("Enter benchmark phrase:", value="i am a student")
+        if st.button("Compare Architecture"):
+            # Inference Logic
+            def infer(m, is_attn, text, data_e, data_h):
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                m.eval()
+                tokens = simple_tokenizer(text)
+                src = [data_e['stoi'].get('<sos>', 2)] + [data_e['stoi'].get(t, 0) for t in tokens] + [data_e['stoi'].get('<eos>', 3)]
+                src = torch.LongTensor(src).unsqueeze(0).to(device)
+                
+                with torch.no_grad():
+                    if is_attn: outs, (h, c) = m.encoder.get_all_outputs(src)
+                    else: h, c = m.encoder(src)
+                
+                trg = [data_e['stoi'].get('<sos>', 2)]
+                for _ in range(50):
+                    t_in = torch.LongTensor([trg[-1]]).to(device)
+                    with torch.no_grad():
+                        if is_attn: out, h, c, _ = m.decoder(t_in, h, c, outs)
+                        else: out, h, c = m.decoder(t_in, h, c)
+                    p = out.argmax(1).item()
+                    trg.append(p)
+                    if p == data_e['stoi'].get('<eos>', 3): break
+                return " ".join([data_h['itos'].get(i, '<unk>') for i in trg][1:-1])
 
-# Sidebar
-with st.sidebar:
-    st.image("https://img.icons8.com/clouds/100/000000/artificial-intelligence.png")
-    st.markdown("### Model Config")
-    st.write(f"Environment: {sys.version.split()[0]}")
-    st.write(f"CUDA Available: {torch.cuda.is_available()}")
-    st.success("Deployment: Researcher Suite v1.2")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("#### 🟦 Simple Seq2Seq")
+                st.markdown(f'<div class="comparison-box">{infer(assets["s"], False, q, assets["env"], assets["hiv"])}</div>', unsafe_allow_html=True)
+            with c2:
+                st.markdown("#### 🟨 Attention Mechanism")
+                st.markdown(f'<div class="comparison-box">{infer(assets["a"], True, q, assets["env"], assets["hiv"])}</div>', unsafe_allow_html=True)
 
 st.markdown("---")
-st.caption("ATML Lab Solutions | Seq2Seq Research Protocol")
+st.caption("Deployment Protocol v2.1 | Powered by Transformers 4.38.2 & Portable Vocab")
