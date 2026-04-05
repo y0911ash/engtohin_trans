@@ -1,12 +1,14 @@
 import streamlit as st
-from transformers import pipeline
 import torch
 import torch.nn as nn
 from model import EncoderLSTM, DecoderLSTM, Seq2Seq, DecoderAttention, Seq2SeqWithAttention
-import math
+import os
+import sys
+from torchtext.data.utils import get_tokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 # Page Config
-st.set_page_config(page_title="NLP Sequence Hub", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Researcher MT Hub", layout="wide", page_icon="🔬")
 
 # Custom Styling
 st.markdown("""
@@ -25,93 +27,142 @@ st.markdown("""
         padding: 20px;
         border-radius: 10px;
         border: 1px solid rgba(255, 255, 255, 0.1);
+        min-height: 150px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🌍 NLP Sequence Hub")
-st.markdown("### English to Hindi Translation & Abstractive Summarization")
+# Path Resolution
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Helper Functions
+en_tokenizer = get_tokenizer('basic_english')
+
+@st.cache_resource
+def load_assets():
+    assets = {}
+    try:
+        en_vocab_path = os.path.join(BASE_DIR, 'en_vocab.pt')
+        hi_vocab_path = os.path.join(BASE_DIR, 'hi_vocab.pt')
+        
+        if not os.path.exists(en_vocab_path) or not os.path.exists(hi_vocab_path):
+            return None, "Vocabulary files (.pt) not found in workspace."
+            
+        assets['en_vocab'] = torch.load(en_vocab_path, map_location='cpu')
+        assets['hi_vocab'] = torch.load(hi_vocab_path, map_location='cpu')
+        
+        INPUT_DIM = len(assets['en_vocab'])
+        OUTPUT_DIM = len(assets['hi_vocab'])
+        HID_DIM = 256
+        N_LAYERS = 1
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize Simple
+        enc1 = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        dec1 = DecoderLSTM(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        model_s = Seq2Seq(enc1, dec1, device).to(device)
+        
+        simple_path = os.path.join(BASE_DIR, 'en-hi-simple-model.pt')
+        if os.path.exists(simple_path):
+            model_s.load_state_dict(torch.load(simple_path, map_location=device))
+        assets['model_simple'] = model_s
+        
+        # Initialize Attention
+        enc2 = EncoderLSTM(INPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        dec2 = DecoderAttention(OUTPUT_DIM, HID_DIM, N_LAYERS).to(device)
+        model_a = Seq2SeqWithAttention(enc2, dec2, device).to(device)
+        
+        attn_path = os.path.join(BASE_DIR, 'en-hi-attention-model.pt')
+        if os.path.exists(attn_path):
+            model_a.load_state_dict(torch.load(attn_path, map_location=device))
+        assets['model_attn'] = model_a
+        
+        return assets, None
+    except Exception as e:
+        return None, f"Asset Loading Error: {str(e)}"
+
+def translate_logic(sentence, model, assets, is_attention=True, max_len=50):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    en_vocab = assets['en_vocab']
+    hi_vocab = assets['hi_vocab']
+    
+    model.eval()
+    tokens = en_tokenizer(sentence)
+    src_indexes = [en_vocab['<sos>']] + [en_vocab[token] for token in tokens] + [en_vocab['<eos>']]
+    src_tensor = torch.LongTensor(src_indexes).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        if is_attention:
+            encoder_outputs, (hidden, cell) = model.encoder.get_all_outputs(src_tensor)
+        else:
+            hidden, cell = model.encoder(src_tensor)
+            
+    trg_indexes = [hi_vocab['<sos>']]
+    for i in range(max_len):
+        trg_tensor = torch.LongTensor([trg_indexes[-1]]).to(device)
+        with torch.no_grad():
+            if is_attention:
+                output, hidden, cell, _ = model.decoder(trg_tensor, hidden, cell, encoder_outputs)
+            else:
+                output, hidden, cell = model.decoder(trg_tensor, hidden, cell)
+                
+        pred_token = output.argmax(1).item()
+        trg_indexes.append(pred_token)
+        if pred_token == hi_vocab['<eos>']: break
+        
+    itos = hi_vocab.get_itos()
+    res = " ".join([itos[i] for i in trg_indexes][1:-1])
+    return res if res else "(Empty Output)"
+
+# Main UI
+st.title("🌍 Researcher MT Hub")
+st.markdown("### English to Hindi Benchmark Suite")
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["🌎 Standard Translator", "📝 Neural Summarization", "🔬 Researcher Mode (Attention)"])
+tab1, tab2 = st.tabs(["🚀 SOTA Translator", "🔬 Researcher Comparison"])
 
 with tab1:
-    st.subheader("English to Hindi Machine Translation (SOTA)")
-    trans_input = st.text_area("Source Text (English)", height=150, placeholder="Enter English text to translate...", key="std_input")
-    if st.button("Translate", key="trans_btn"):
-        if trans_input:
-            with st.spinner("🔄 Initializing Translation Pipeline..."):
-                try:
-                    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-                    model_name = "Helsinki-NLP/opus-mt-en-hi"
-                    tokenizer = AutoTokenizer.from_pretrained(model_name)
-                    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-                    inputs = tokenizer(trans_input, return_tensors="pt", padding=True)
-                    translated_tokens = model.generate(**inputs)
-                    res_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
-                    st.success("##### SOTA Translation Output:")
-                    st.info(res_text)
-                except Exception as e:
-                    st.error(f"Engine Error: {str(e)}")
+    st.subheader("SOTA MarianMT (Direct Model Inference)")
+    sota_input = st.text_area("English Source", key="sota_in", value="How are you?")
+    if st.button("SOTA Translate"):
+        with st.spinner("🔄 Neural Inference in progress..."):
+            try:
+                model_name = "Helsinki-NLP/opus-mt-en-hi"
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+                inputs = tokenizer(sota_input, return_tensors="pt", padding=True)
+                translated_tokens = model.generate(**inputs)
+                res = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+                st.success(f"**SOTA Result:** {res}")
+            except Exception as e:
+                st.error(f"SOTA Hub Error: {str(e)}")
 
 with tab2:
-    st.subheader("Neural Text Summarization")
-    sum_input = st.text_area("Source Article", height=250, placeholder="Paste a long English article here...", key="sum_input")
-    if st.button("Summarize", key="sum_btn"):
-        if sum_input:
-            with st.spinner("🧠 Synthesizing Content..."):
-                try:
-                    summarizer = pipeline("summarization", model="t5-small")
-                    summary = summarizer(sum_input, max_length=150, min_length=30, do_sample=False)
-                    st.success("##### Summary Output:")
-                    st.info(summary[0]['summary_text'])
-                except Exception as e:
-                    st.error(f"Synthesis Error: {str(e)}")
-
-with tab3:
-    st.subheader("🔬 Architecture Comparison: Simple vs Attention")
-    st.markdown("Compare the performance of Lab 6 (Simple) vs Lab A.1 (Attention) custom models.")
+    st.subheader("Lab A.1: Custom Encoder-Decoder Benchmarks")
+    assets, error = load_assets()
     
-    compar_input = st.text_input("Enter a short sentence to compare focus:", value="the book is on the table")
-    
-    if st.button("Run Comparison", key="comp_btn"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 🟦 Simple Encoder-Decoder")
-            with st.container():
-                st.markdown('<div class="comparison-box">', unsafe_allow_html=True)
-                st.write("**Model:** LSTM-based Seq2Seq")
-                st.write("**Prediction:** (Simulated/Placeholder)")
-                st.info("किताब मेज पर है।")
-                st.progress(0.4, text="Confidence: 40%")
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-        with col2:
-            st.markdown("#### 🟨 With Attention Mechanism")
-            with st.container():
-                st.markdown('<div class="comparison-box">', unsafe_allow_html=True)
-                st.write("**Model:** LSTM + Bahdanau Attention")
-                st.write("**Prediction:** (Simulated/Placeholder)")
-                st.info("किताब मेज पर है।")
-                st.progress(0.85, text="Confidence: 85%")
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-    st.write("---")
-    st.markdown("#### 📊 Performance Dashboard")
-    metric1, metric2, metric3 = st.columns(3)
-    metric1.metric("Avg. Training Time", "1.2h", "+15% (Attn)")
-    metric2.metric("Validation PPL", "12.4", "-4.2 (Better)")
-    metric3.metric("BLEU Score", "45.2", "+8.1 (Better)")
+    if error:
+        st.warning(f"⚠️ {error} Please run the notebook first.")
+    else:
+        user_input = st.text_input("Enter sentence to compare focus:", value="the book is on the table")
+        if st.button("Run Lab Comparison"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("#### 🟦 Simple Seq2Seq")
+                out_s = translate_logic(user_input, assets['model_simple'], assets, is_attention=False)
+                st.markdown(f'<div class="comparison-box">{out_s}</div>', unsafe_allow_html=True)
+            with col2:
+                st.info("#### 🟨 Bahdanau Attention")
+                out_a = translate_logic(user_input, assets['model_attn'], assets, is_attention=True)
+                st.markdown(f'<div class="comparison-box">{out_a}</div>', unsafe_allow_html=True)
 
-# Sidebar Warning
+# Sidebar
 with st.sidebar:
-    import sys
-    st.image("https://img.icons8.com/clouds/100/000000/brain.png")
-    st.info(f"System Python: {sys.version.split()[0]}")
-    if "3.14" in sys.version:
-        st.error("⚠️ CRITICAL: Python 3.14 detected. Consider downgrading to 3.11 for stability.")
-    st.success("Models: ATML Lab Suite v1.1-Attention")
+    st.image("https://img.icons8.com/clouds/100/000000/artificial-intelligence.png")
+    st.markdown("### Model Config")
+    st.write(f"Environment: {sys.version.split()[0]}")
+    st.write(f"CUDA Available: {torch.cuda.is_available()}")
+    st.success("Deployment: Researcher Suite v1.2")
 
 st.markdown("---")
-st.caption("Built with PyTorch & Transformers | ATML Lab A.1 Solutions")
+st.caption("ATML Lab Solutions | Seq2Seq Research Protocol")
